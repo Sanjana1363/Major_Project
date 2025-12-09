@@ -15,35 +15,32 @@ import {
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { Accelerometer } from "expo-sensors";
-import { Audio } from "expo-av";
 import * as Location from "expo-location";
 import * as Linking from "expo-linking";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
 
-// ✅ Safety Screen Component
 export default function SafetyScreen() {
   const [safetyOn, setSafetyOn] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [heartRateValue, setHeartRateValue] = useState<number | null>(null);
+  const [heartRateValue, setHeartRateValue] = useState(null);
   const [fallDetected, setFallDetected] = useState(false);
   const [alertTriggered, setAlertTriggered] = useState(false);
+  const [shakeCount, setShakeCount] = useState(0);
 
   const [permission, requestPermission] = useCameraPermissions();
-  const cameraRef = useRef<any>(null);
+  const cameraRef = useRef(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [measuring, setMeasuring] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(null);
 
-  const [contacts, setContacts] = useState<string[]>([]);
+  const [contacts, setContacts] = useState([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [newContact, setNewContact] = useState("");
 
-  let accelSubscription: any = null;
-  let recording: Audio.Recording | null = null;
-  let sosCooldown = false;
-  let heartTimer: any = null;
+  const accelSubscription = useRef(null);
+  const sosCooldownRef = useRef(false);
+  const shakeTimerRef = useRef(null);
 
   useEffect(() => {
     loadContacts();
@@ -51,195 +48,193 @@ export default function SafetyScreen() {
 
   useEffect(() => {
     if (safetyOn) {
-      startScreamDetection();
       startHeartbeatMonitoring();
-      startFallDetection();
+      startSensors(); // shake + fall in one listener
     } else {
-      stopScreamDetection();
       stopHeartbeatMonitoring();
-      stopFallDetection();
+      stopSensors();
     }
+
     return () => {
-      stopScreamDetection();
       stopHeartbeatMonitoring();
-      stopFallDetection();
+      stopSensors();
     };
   }, [safetyOn]);
 
-  // ------------------- Heartbeat Monitoring -------------------
+  // --------------- Shake + Fall Detection (Expo sensors) ---------------
+  const startSensors = () => {
+    setShakeCount(0);
+    setFallDetected(false);
+    setAlertTriggered(false);
+
+    Accelerometer.setUpdateInterval(100);
+
+    if (accelSubscription.current) {
+      accelSubscription.current.remove();
+    }
+
+    accelSubscription.current = Accelerometer.addListener(({ x, y, z }) => {
+      const force = Math.sqrt(x * x + y * y + z * z);
+
+      // Shake detection – 3 strong shakes in 2 seconds
+      if (force > 2.8) {
+        setShakeCount((prev) => {
+          const next = prev + 1;
+
+          if (next === 1) {
+            // reset after 2 seconds
+            shakeTimerRef.current = setTimeout(() => {
+              setShakeCount(0);
+            }, 2000);
+          }
+
+          if (next >= 3) {
+            triggerSOS();
+            setShakeCount(0);
+            if (shakeTimerRef.current) {
+              clearTimeout(shakeTimerRef.current);
+              shakeTimerRef.current = null;
+            }
+          }
+
+          return next;
+        });
+      }
+
+      // Fall detection – very low acceleration (phone dropped / free fall)
+      if (!alertTriggered && force < 0.5) {
+        setFallDetected(true);
+        setAlertTriggered(true);
+        Alert.alert("⚠ Fall Detected!", "Your phone was dropped!");
+        triggerSOS();
+      }
+    });
+  };
+
+  const stopSensors = () => {
+    if (accelSubscription.current) {
+      accelSubscription.current.remove();
+      accelSubscription.current = null;
+    }
+    if (shakeTimerRef.current) {
+      clearTimeout(shakeTimerRef.current);
+      shakeTimerRef.current = null;
+    }
+    setShakeCount(0);
+  };
+
+  // --------------- Heartbeat (simulated using camera + timer) ---------------
   const startHeartbeatMonitoring = async () => {
     if (cameraActive || measuring) return;
     setError(null);
 
     if (!permission?.granted) {
-      Alert.alert("Permission Needed", "Camera access is required for heartbeat monitoring.");
-      await requestPermission();
-      return;
+      const result = await requestPermission();
+      if (!result.granted) {
+        setError("Camera permission is required for heartbeat monitoring.");
+        return;
+      }
     }
 
     setCameraActive(true);
     setMeasuring(true);
-    Alert.alert("Heartbeat Check", "Place your fingertip gently on the camera lens ❤️");
+    setHeartRateValue(null);
+    Alert.alert("Heartbeat Check", "Place your fingertip gently on the camera lens ❤");
 
-    try {
-      if (!cameraRef.current) throw new Error("Camera not ready");
-
-      // Simulate heartbeat readings
-      let beats: number[] = [];
-      for (let i = 0; i < 5; i++) {
-        await new Promise((res) => setTimeout(res, 1000)); // simulate delay
-        const randomBeat = 70 + Math.floor(Math.random() * 15);
-        beats.push(randomBeat);
-      }
-
-      const avg = Math.round(beats.reduce((a, b) => a + b, 0) / beats.length);
-      setHeartRateValue(avg);
+    // Simulate reading after 3 seconds
+    setTimeout(() => {
+      const simulated = 72 + Math.floor(Math.random() * 10);
+      setHeartRateValue(simulated);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch (err) {
-      console.log("Heartbeat error:", err);
-      setError("Camera unavailable – showing simulated heartbeat ❤️");
-      simulateHeartbeat();
-    } finally {
       setMeasuring(false);
       setCameraActive(false);
-    }
-  };
-
-  const simulateHeartbeat = () => {
-    const simulated = 70 + Math.floor(Math.random() * 15);
-    setHeartRateValue(simulated);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    }, 3000);
   };
 
   const stopHeartbeatMonitoring = () => {
-    if (heartTimer) clearInterval(heartTimer);
     setCameraActive(false);
     setMeasuring(false);
     setHeartRateValue(null);
   };
 
-  // ------------------- Scream Detection -------------------
-  const startScreamDetection = async () => {
-    if (recording) return;
-    try {
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) return;
-
-      recording = new Audio.Recording();
-      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      await recording.startAsync();
-      setIsListening(true);
-    } catch (err) {
-      console.log("Scream Detection Error:", err);
-    }
-  };
-
-  const stopScreamDetection = async () => {
-    if (recording) {
-      try {
-        await recording.stopAndUnloadAsync();
-      } catch (err) {
-        console.log("Stop Recording Error:", err);
-      }
-      recording = null;
-      setIsListening(false);
-    }
-  };
-
-  // ------------------- Fall Detection -------------------
-  const startFallDetection = () => {
-    setFallDetected(false);
-    setAlertTriggered(false);
-    accelSubscription = Accelerometer.addListener((data) => {
-      const { x, y, z } = data;
-      const total = Math.sqrt(x * x + y * y + z * z);
-      if (!alertTriggered && total < 0.5) {
-        setFallDetected(true);
-        setAlertTriggered(true);
-        Alert.alert("⚠️ Fall Detected!", "Your phone was dropped!");
-        triggerSOS();
-      }
-    });
-    Accelerometer.setUpdateInterval(100);
-  };
-
-  const stopFallDetection = () => {
-    if (accelSubscription) accelSubscription.remove();
-  };
-
-  // ------------------- Safety Toggle -------------------
-  const toggleSafety = (value: boolean) => {
-    setSafetyOn(value);
-    Alert.alert(
-      "Safety " + (value ? "ON" : "OFF"),
-      value ? "Monitoring active" : "Monitoring stopped"
-    );
-  };
-
-  // ------------------- Contacts -------------------
+  // --------------- AsyncStorage: Emergency Contacts ---------------
   const loadContacts = async () => {
-    const saved = await AsyncStorage.getItem("emergencyContacts");
-    if (saved) setContacts(JSON.parse(saved));
+    try {
+      const saved = await AsyncStorage.getItem("emergencyContacts");
+      if (saved) setContacts(JSON.parse(saved));
+    } catch (e) {
+      console.log("Error loading contacts", e);
+    }
   };
 
   const addEmergencyContact = async () => {
-    if (!newContact) return;
-    const updated = [...contacts, newContact];
+    if (!newContact.trim()) return;
+    const updated = [...contacts, newContact.trim()];
     setContacts(updated);
     await AsyncStorage.setItem("emergencyContacts", JSON.stringify(updated));
     setNewContact("");
     setModalVisible(false);
   };
 
-  const deleteContact = async (index: number) => {
+  const deleteContact = async (index) => {
     const updated = contacts.filter((_, i) => i !== index);
     setContacts(updated);
     await AsyncStorage.setItem("emergencyContacts", JSON.stringify(updated));
   };
 
-  // ------------------- SOS -------------------
+  // --------------- SOS Logic ---------------
   const triggerSOS = () => {
-    if (sosCooldown) return;
-    sosCooldown = true;
-    setTimeout(() => (sosCooldown = false), 8000);
+    if (sosCooldownRef.current) return;
+    sosCooldownRef.current = true;
+    setTimeout(() => {
+      sosCooldownRef.current = false;
+    }, 8000); // 8s cooldown
 
     if (contacts.length === 0) {
       Alert.alert("No Contacts", "Please add emergency contacts first!");
       return;
     }
 
-    contacts.forEach((phone) => Linking.openURL(`tel:${phone}`));
+    contacts.forEach((phone) => {
+      const cleaned = phone.replace(/\s+/g, "");
+      Linking.openURL(`tel:${cleaned}`);
+    });
+
     Alert.alert("🚨 SOS Triggered", "Calling all emergency contacts!");
   };
 
-  // ------------------- Police -------------------
+  // --------------- Nearby Police (Expo Location + Linking) ---------------
   const openNearbyPolice = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== "granted") {
-      Alert.alert("Permission Denied", "Location access is required.");
+      Alert.alert("Permission required", "Location permission is needed to send your location.");
       return;
     }
+
     const location = await Location.getCurrentPositionAsync({});
     const { latitude, longitude } = location.coords;
     const mapsLink = `https://maps.google.com/?q=${latitude},${longitude}`;
     const policeNumber = "100";
+    const body = encodeURIComponent(`Emergency! My location: ${mapsLink}`);
+
     Alert.alert("Contact Police", "Do you want to call or send your location?", [
-      { text: "Cancel", style: "cancel" },
       { text: "Call", onPress: () => Linking.openURL(`tel:${policeNumber}`) },
       {
         text: "Send Location",
-        onPress: () =>
-          Linking.openURL(
-            `sms:${policeNumber}?body=Emergency! I need help. My location: ${mapsLink}`
-          ),
+        onPress: () => Linking.openURL(`sms:${policeNumber}?body=${body}`),
       },
+      { text: "Cancel", style: "cancel" },
     ]);
   };
 
-  // ------------------- UI -------------------
+  const toggleSafety = (value) => {
+    setSafetyOn(value);
+    Alert.alert("Safety " + (value ? "ON" : "OFF"));
+  };
+
   return (
     <View style={styles.container}>
-      <Text style={styles.header}>🛡️ Safety Center</Text>
+      <Text style={styles.header}>🛡 Safety Center</Text>
       <Text style={styles.subtext}>Your AI-powered personal safety companion</Text>
 
       <View style={styles.masterToggle}>
@@ -249,19 +244,22 @@ export default function SafetyScreen() {
         <Switch value={safetyOn} onValueChange={toggleSafety} />
       </View>
 
+      {error && (
+        <Text style={{ color: "red", textAlign: "center", marginBottom: 10 }}>{error}</Text>
+      )}
+
       <ScrollView contentContainerStyle={styles.scroll}>
         <FeatureCard
-          icon={<Ionicons name="mic-outline" size={28} color="#fff" />}
-          title="Scream Detection"
-          description={isListening ? "Listening for screams..." : "Not active"}
-          onPress={() => (isListening ? stopScreamDetection() : startScreamDetection())}
+          icon={<Ionicons name="flash-outline" size={28} color="#fff" />}
+          title="Shake to Trigger SOS"
+          description="Shake phone 3 times strongly"
         />
 
         <FeatureCard
           icon={<Ionicons name="body-outline" size={28} color="#fff" />}
           title="Fall Detection"
           description={fallDetected ? "Fall Detected!" : "Monitoring for falls..."}
-          onPress={startFallDetection}
+          onPress={startSensors}
         />
 
         <FeatureCard
@@ -277,8 +275,7 @@ export default function SafetyScreen() {
           onPress={startHeartbeatMonitoring}
         />
 
-        {measuring && <ActivityIndicator size="large" color="#e60073" style={{ marginTop: 15 }} />}
-        {error && <Text style={styles.error}>{error}</Text>}
+        {measuring && <ActivityIndicator size="large" style={{ marginTop: 15 }} />}
 
         <FeatureCard
           icon={<Ionicons name="location-outline" size={28} color="#fff" />}
@@ -296,9 +293,12 @@ export default function SafetyScreen() {
         </TouchableOpacity>
       </ScrollView>
 
-      {/* ✅ Hidden CameraView used for permission only */}
-      {cameraActive && (
-        <CameraView ref={cameraRef} style={{ width: 1, height: 1 }} />
+      {cameraActive && permission?.granted && (
+        <CameraView
+          ref={cameraRef}
+          style={{ width: 1, height: 1 }} // hidden
+          facing="back"
+        />
       )}
 
       {/* Contact Modal */}
@@ -306,6 +306,7 @@ export default function SafetyScreen() {
         <View style={styles.modalContainer}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Emergency Contacts</Text>
+
             <TextInput
               style={styles.modalInput}
               placeholder="Enter phone number"
@@ -313,9 +314,11 @@ export default function SafetyScreen() {
               value={newContact}
               onChangeText={setNewContact}
             />
+
             <TouchableOpacity style={styles.modalButton} onPress={addEmergencyContact}>
               <Text style={styles.modalButtonText}>Save</Text>
             </TouchableOpacity>
+
             <TouchableOpacity
               style={[styles.modalButton, { backgroundColor: "#888" }]}
               onPress={() => setModalVisible(false)}
@@ -325,14 +328,10 @@ export default function SafetyScreen() {
 
             <FlatList
               data={contacts}
-              keyExtractor={(item, index) => index.toString()}
+              keyExtractor={(_, index) => index.toString()}
               renderItem={({ item, index }) => (
                 <View
-                  style={{
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                    marginTop: 5,
-                  }}
+                  style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 5 }}
                 >
                   <Text>{item}</Text>
                   <TouchableOpacity onPress={() => deleteContact(index)}>
@@ -348,18 +347,8 @@ export default function SafetyScreen() {
   );
 }
 
-// ✅ Feature Card Component
-function FeatureCard({
-  icon,
-  title,
-  description,
-  onPress,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  onPress?: () => void;
-}) {
+// Reusable feature card
+function FeatureCard({ icon, title, description, onPress }) {
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
       <LinearGradient colors={["#ba68c8", "#8e24aa"]} style={styles.card}>
@@ -431,5 +420,5 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   modalButtonText: { color: "#fff", fontWeight: "bold" },
-  error: { color: "red", textAlign: "center", marginTop: 10 },
 });
+
